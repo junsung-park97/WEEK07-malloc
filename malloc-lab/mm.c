@@ -64,100 +64,19 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char*)(bp) + GET_SIZE((char*)(bp) - WSIZE))
 #define PREV_BLKP(bp) ((char*)(bp) - GET_SIZE((char*)(bp) - DSIZE))
 
+//----------전역함수 선언----------
 static void* coalesce(void* bp);
+static void *extend_heap(size_t words);
+static void* find_fit(size_t asize);
+static void* first_fit (size_t asize);
+static void* next_fit (size_t asize);
+static void place(void* bp, size_t asize);
+//----------전역변수 선언---------
 static char* heap_list;
+static void* last_bp;
 
 
-// 힙의 크기를 확장하고 확장된 영역을 사용가능 블럭으로 초기화
-static void *extend_heap(size_t words) {
-    // 블럭포인터
-    char* bp;
-    // 블럭사이즈
-    size_t size;
 
-    // 확장할 메모리 크기를 워드단위로, 짝수 워드 정렬 유지, 
-    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
-    bp = mem_sbrk(size);
-
-    if (bp == (void*)-1) {
-        return NULL;
-    }
-
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
-
-    return coalesce(bp);
-}
-static void* coalesce(void* bp)
-{
-    size_t perv_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
-
-    //case1
-    if (perv_alloc && next_alloc) 
-    {
-        return bp;
-    } 
-    //case2
-    else if (perv_alloc && !next_alloc) 
-    {   
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(bp), PACK(size, 0));
-        PUT(FTRP(bp), PACK(size, 0));
-    }
-    // case3
-    else if (!perv_alloc && next_alloc)
-    {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        PUT(FTRP(bp), PACK(size, 0));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
-    }
-    //case4
-    else
-    {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)))
-            + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-        bp = PREV_BLKP(bp);
-    }
-    return bp;
-}
-static void* find_fit(size_t asize)
-{
-    void* bp = NEXT_BLKP(heap_list);
-
-    while (GET_SIZE(HDRP(bp)) > 0)
-    {
-        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
-        {
-            return bp;
-        }
-        bp = NEXT_BLKP(bp);
-    }
-    return NULL;
-}
-
-static void place(void* bp, size_t asize)
-{
-    size_t csize = GET_SIZE(HDRP(bp));
-
-    if ((csize - asize) >= (2*DSIZE))
-    {
-        PUT(HDRP(bp), PACK(asize, 1));
-        PUT(FTRP(bp), PACK(asize, 1));
-
-        void *rp = NEXT_BLKP(bp);
-        PUT(HDRP(rp), PACK(csize - asize, 0));
-        PUT(FTRP(rp), PACK(csize - asize, 0));
-    } else {
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
-    }
-}
 
 /*
  * mm_init - malloc 패키지를 초기화합니다
@@ -232,7 +151,7 @@ void mm_free(void *ptr)
     size_t size = GET_SIZE(HDRP(ptr));
 
     PUT(HDRP(ptr), PACK(size, 0));
-    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
     coalesce(ptr);
 }
 
@@ -246,14 +165,159 @@ void *mm_realloc(void *ptr, size_t size)
     void *newptr;
     size_t copySize;
 
-    // newptr = mm_malloc(size);
-    // if (newptr == NULL)
-    //     return NULL;
-    // copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    // if (size < copySize)
-    //     copySize = size;
-    // memcpy(newptr, oldptr, copySize);
-    // mm_free(oldptr);
-    // return newptr;
+    newptr = mm_malloc(size);
+    if (newptr == NULL)
+        return NULL;
+    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
+    if (size < copySize)
+        copySize = size;
+    memcpy(newptr, oldptr, copySize);
+    mm_free(oldptr);
+    return newptr;
 
+    // 뒤 여백을 확인하고 지금 나의 포인터의 크기와 뒤 블록의 크기의 합이 입력받은 사이즈값보다 크면 병합후 메모리 복사, 
+    // 아니면 그냥 말록
+    
+    // if (size > GET_SIZE(HDRP(ptr)))
+    // {
+
+    // }
+}
+
+// 힙의 크기를 확장하고 확장된 영역을 사용가능 블럭으로 초기화
+static void *extend_heap(size_t words) {
+    // 블럭포인터
+    char* bp;
+    // 블럭사이즈
+    size_t size;
+
+    // 확장할 메모리 크기를 워드단위로, 짝수 워드 정렬 유지, 
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+    bp = mem_sbrk(size);
+
+    if (bp == (void*)-1) {
+        return NULL;
+    }
+
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
+
+    return coalesce(bp);
+}
+static void* coalesce(void* bp)
+{
+    size_t perv_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    //case1
+    if (perv_alloc && next_alloc) 
+    {
+        return bp;
+    } 
+    //case2
+    else if (perv_alloc && !next_alloc) 
+    {   
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
+    }
+    // case3
+    else if (!perv_alloc && next_alloc)
+    {
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp);
+    }
+    //case4
+    else
+    {
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)))
+            + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp);
+    }
+    return bp;
+}
+static void* find_fit(size_t asize)
+{
+    void* bp;
+
+    if (asize == 0) {
+        return NULL;
+    }
+    if (last_bp == NULL) {
+        bp = first_fit(asize);
+    }
+    else {
+        bp = next_fit(asize);
+    }
+    return bp;
+}
+
+static void* first_fit (size_t asize)
+{
+    void* bp = NEXT_BLKP(heap_list);
+    while (GET_SIZE(HDRP(bp)) > 0)
+    {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        {
+            last_bp = bp;
+            return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    }
+    return NULL;
+}
+static void* next_fit (size_t asize)
+{
+    void* bp = NULL;
+    void* lp = last_bp;  // 시작점 저장
+    
+    // 첫 번째 순회: last_bp부터 힙 끝까지 (lp는 이동)
+    for (;GET_SIZE(HDRP(lp)) > 0; lp = NEXT_BLKP(lp))
+    {
+        if (!GET_ALLOC(HDRP(lp)) && (asize <= GET_SIZE(HDRP(lp))))
+        {
+            last_bp = lp;  // 찾으면 last_bp 업데이트
+            return lp;
+        }
+    }
+    
+    // 두 번째 순회: 힙 처음부터 원래 last_bp 직전까지
+    if (bp == NULL)
+    {
+        for (bp = NEXT_BLKP(heap_list); (bp != last_bp) && (GET_SIZE(HDRP(bp)) > 0); bp = NEXT_BLKP(bp))
+        {
+            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+            {
+                last_bp = bp;
+                return bp;
+            }
+        }
+        return NULL;
+    } 
+    return NULL;
+}
+
+static void place(void* bp, size_t asize)
+{
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    if ((csize - asize) >= (2*DSIZE))
+    {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+
+        void *rp = NEXT_BLKP(bp);
+        PUT(HDRP(rp), PACK(csize - asize, 0));
+        PUT(FTRP(rp), PACK(csize - asize, 0));
+        last_bp = rp;
+    } else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
 }
