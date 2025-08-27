@@ -97,6 +97,7 @@ int mm_init(void)
     PUT(heap_list + (2*WSIZE), PACK(DSIZE, 1));
     PUT(heap_list + (3*WSIZE), PACK(0, 1));
     heap_list += (2*WSIZE);
+    last_bp = NULL;
 
     // 빈 힙을 CHUNKSIZE크기의 사용 가능 블록으로 확장합니다.
     if(extend_heap(CHUNKSIZE/WSIZE) == NULL){
@@ -161,27 +162,60 @@ void mm_free(void *ptr)
 // 말록으로 할당받은 메모리를 realloc을 사용하여 크기를 변경, 크기를 변경하려면 메모리도 복사해야됨
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
+    //
+    // 현재블럭의 크기와 다음블럭의 할당유무 확인
+    // 현재블럭의 크기와 다음블럭의 크기가 요청크기보다 크거나 같으면 제자리 할당
+    // 아니면 말록으로 새로운 할당후 메모리복사
+    // 기존 메모리 복사가 비용이 가장 적지만, 안되면 뒷블럭의 메모리와 병합하는것이 비용측면에서 이득이고, 그것도 안되면 이 전 메모리에 병합하는것이 비용측면 최선이다.
+    // 이전블럭으로 메모리를 밀어넣는것이 공간효율성 측면에서 이득이 될 수도?있다.
+
+    void *curptr = ptr;
+    void *nextptr = NEXT_BLKP(ptr);
+    void *prevptr = PREV_BLKP(ptr);
     void *newptr;
     size_t copySize;
 
-    newptr = mm_malloc(size);
+    copySize = GET_SIZE(HDRP(curptr)) - DSIZE;
     if (newptr == NULL)
+    {
         return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-        copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    }
+    if (size <= copySize)
+    {
+        // 메모리 축소, 제자리 해결
+    }
+    else
+    {
+        if (!GET_ALLOC(HDRP(nextptr)) && GET_ALLOC(HDRP(prevptr)) && (GET_SIZE(nextptr) + copySize) >= size)
+        {
+            // 제자리 복사
+        }
+        else if (GET_ALLOC(nextptr) && !GET_ALLOC(prevptr) && (GET_SIZE(prevptr) + copySize) >= size)
+        {
+            // prevptr로 메모리 복사후 포인터 변경
+        }
+        else if () //둘다 프리
+        {
+            // 병합후 포인터를 prev로 변경, 남는 블록은 분할
+        }
+        else
+        {
+            newptr = mm_malloc(size);
+        }
+        return 0;
+    }
 
-    // 뒤 여백을 확인하고 지금 나의 포인터의 크기와 뒤 블록의 크기의 합이 입력받은 사이즈값보다 크면 병합후 메모리 복사, 
-    // 아니면 그냥 말록
+    // newptr = mm_malloc(size);
+    // if (newptr == NULL)
+    //     return NULL;
+    // copySize = GET_SIZE(HDRP(oldptr)) - DSIZE; // 페이로드 사이즈
+    // if (size < copySize)
+    //     copySize = size;
+    // memcpy(newptr, oldptr, copySize);
+    // mm_free(oldptr);
+    // return newptr;
+
     
-    // if (size > GET_SIZE(HDRP(ptr)))
-    // {
-
-    // }
 }
 
 // 힙의 크기를 확장하고 확장된 영역을 사용가능 블럭으로 초기화
@@ -210,6 +244,8 @@ static void* coalesce(void* bp)
     size_t perv_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
+    void* merged_start = bp;
+    void* merged_end = (char*)bp + size;
 
     //case1
     if (perv_alloc && next_alloc) 
@@ -222,6 +258,10 @@ static void* coalesce(void* bp)
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
+
+        if (last_bp > bp && last_bp < (char*)bp + size) {
+        last_bp = bp;
+    }
     }
     // case3
     else if (!perv_alloc && next_alloc)
@@ -230,6 +270,10 @@ static void* coalesce(void* bp)
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
+
+        if (last_bp > bp && last_bp < (char*)bp + size) {
+        last_bp = bp;
+    }
     }
     //case4
     else
@@ -239,7 +283,12 @@ static void* coalesce(void* bp)
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
+
+        if (last_bp >= bp && last_bp < (char*)bp + size) {
+        last_bp = bp;
     }
+    }
+    
     return bp;
 }
 static void* find_fit(size_t asize)
@@ -274,32 +323,53 @@ static void* first_fit (size_t asize)
 }
 static void* next_fit (size_t asize)
 {
-    void* bp = NULL;
-    void* lp = last_bp;  // 시작점 저장
+    // void* bp = NULL;
+    // void* lp = last_bp;  // 시작점 저장
     
-    // 첫 번째 순회: last_bp부터 힙 끝까지 (lp는 이동)
-    for (;GET_SIZE(HDRP(lp)) > 0; lp = NEXT_BLKP(lp))
-    {
-        if (!GET_ALLOC(HDRP(lp)) && (asize <= GET_SIZE(HDRP(lp))))
-        {
-            last_bp = lp;  // 찾으면 last_bp 업데이트
-            return lp;
+    // // 첫 번째 순회: last_bp부터 힙 끝까지 (lp는 이동)
+    // for (;GET_SIZE(HDRP(lp)) > 0; lp = NEXT_BLKP(lp))
+    // {
+    //     if (!GET_ALLOC(HDRP(lp)) && (asize <= GET_SIZE(HDRP(lp))))
+    //     {
+    //         last_bp = lp;  // 찾으면 last_bp 업데이트
+    //         return lp;
+    //     }
+    // }
+    
+    // // 두 번째 순회: 힙 처음부터 원래 last_bp 직전까지
+    // if (bp == NULL)
+    // {
+    //     for (bp = NEXT_BLKP(heap_list); (bp != last_bp) && (GET_SIZE(HDRP(bp)) > 0); bp = NEXT_BLKP(bp))
+    //     {
+    //         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+    //         {
+    //             last_bp = bp;
+    //             return bp;
+    //         }
+    //     }
+    //     return NULL;
+    // } 
+    // return NULL;
+
+    void* bp;
+    void* start = last_bp;
+    
+    // last_bp부터 시작해서 힙 끝까지
+    for (bp = last_bp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            last_bp = NEXT_BLKP(bp);  // 다음 검색 시작점
+            return bp;
         }
     }
     
-    // 두 번째 순회: 힙 처음부터 원래 last_bp 직전까지
-    if (bp == NULL)
-    {
-        for (bp = NEXT_BLKP(heap_list); (bp != last_bp) && (GET_SIZE(HDRP(bp)) > 0); bp = NEXT_BLKP(bp))
-        {
-            if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
-            {
-                last_bp = bp;
-                return bp;
-            }
+    // 힙 시작부터 원래 위치까지
+    for (bp = NEXT_BLKP(heap_list); bp < start; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+            last_bp = NEXT_BLKP(bp);  // 다음 검색 시작점
+            return bp;
         }
-        return NULL;
-    } 
+    }
+    
     return NULL;
 }
 
@@ -319,5 +389,6 @@ static void place(void* bp, size_t asize)
     } else {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
+        last_bp = NEXT_BLKP(bp);
     }
 }
