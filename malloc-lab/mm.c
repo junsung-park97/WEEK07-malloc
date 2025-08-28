@@ -45,7 +45,7 @@ team_t team = {
 // 상수
 #define WSIZE 4 // 워드 헤더 and 푸터의 크기 (바이트)
 #define DSIZE 8 // 더블 워드 사이즈(바이트)
-#define CHUNKSIZE (1<<12) // 힙 확장을 위한 기본크기(바이트)(4kb)
+#define CHUNKSIZE (1<<9) // 힙 확장을 위한 기본크기(바이트)
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 // 크기와 할당 비트를 통합해서 헤더와 푸터에 저장할 수 있는 값을 리턴
 #define PACK(size, alloc) ((size) | (alloc))
@@ -59,7 +59,7 @@ team_t team = {
 #define GET_ALLOC(p) (GET(p) & 0x1)
 // 블록포인터 bp가 주어지면, 각각 해당 헤더와 푸터를 가리키는 포인터를 리턴한다.
 #define HDRP(bp) ((char*)(bp) - WSIZE)
-#define FTRP(bp) ((char*)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+#define FTRP(bp) (((char*)(bp)) + GET_SIZE(HDRP(bp)) - DSIZE)
 // 블록포인터 bp가 주어지면, 다음블록과 이전블록의 포인터를 각각 리턴한다.
 #define NEXT_BLKP(bp) ((char*)(bp) + GET_SIZE((char*)(bp) - WSIZE))
 #define PREV_BLKP(bp) ((char*)(bp) - GET_SIZE((char*)(bp) - DSIZE))
@@ -169,53 +169,106 @@ void *mm_realloc(void *ptr, size_t size)
     // 기존 메모리 복사가 비용이 가장 적지만, 안되면 뒷블럭의 메모리와 병합하는것이 비용측면에서 이득이고, 그것도 안되면 이 전 메모리에 병합하는것이 비용측면 최선이다.
     // 이전블럭으로 메모리를 밀어넣는것이 공간효율성 측면에서 이득이 될 수도?있다.
 
-    void *curptr = ptr;
-    void *nextptr = NEXT_BLKP(ptr);
-    void *prevptr = PREV_BLKP(ptr);
-    void *newptr;
-    size_t copySize;
+    void *cur_ptr = ptr;
+    void *next_ptr = NEXT_BLKP(ptr);
+    void *prev_ptr = PREV_BLKP(ptr);
+    void *new_ptr;
+    void *split_bp = NEXT_BLKP(prev_ptr);
+    size_t old_size = GET_SIZE(HDRP(ptr)); 
+    size_t copy_size = GET_SIZE(HDRP(cur_ptr)) - DSIZE;;
+    size_t asize;
+    size_t current_size = GET_SIZE(HDRP(ptr));
+    size_t next_size = GET_SIZE(HDRP(next_ptr));
+    size_t total_size = current_size + next_size;
 
-    copySize = GET_SIZE(HDRP(curptr)) - DSIZE;
-    if (newptr == NULL)
+    if (size <= DSIZE)
     {
-        return NULL;
-    }
-    if (size <= copySize)
-    {
-        // 메모리 축소, 제자리 해결
+        asize = 2 * DSIZE;
     }
     else
     {
-        if (!GET_ALLOC(HDRP(nextptr)) && GET_ALLOC(HDRP(prevptr)) && (GET_SIZE(nextptr) + copySize) >= size)
-        {
-            // 제자리 복사
+        asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
+    }
+
+    if (ptr == NULL) {
+    return mm_malloc(size);
+    }
+
+    if (size == 0) {
+        mm_free(ptr);
+        return NULL;
+    }
+
+    if (size <= copy_size)
+    {
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+
+        if ((old_size - asize) >= (2*DSIZE)) {
+            void *split_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(split_bp), PACK(old_size - asize, 0));
+            PUT(FTRP(split_bp), PACK(old_size - asize, 0));
         }
-        else if (GET_ALLOC(nextptr) && !GET_ALLOC(prevptr) && (GET_SIZE(prevptr) + copySize) >= size)
+
+        return ptr;
+    }
+    else
+    {
+        if (!GET_ALLOC(HDRP(next_ptr)) && GET_ALLOC(HDRP(prev_ptr)) && (GET_SIZE(HDRP(next_ptr)) + copy_size) >= size)
         {
-            // prevptr로 메모리 복사후 포인터 변경
+            size_t merged_size = GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(next_ptr));
+            PUT(HDRP(ptr), PACK(merged_size, 1));
+            PUT(FTRP(ptr), PACK(merged_size, 1));
+
+            // 필요하면 분할
+            if ((total_size - asize) >= (2*DSIZE)) {
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+                
+                void *split_bp = NEXT_BLKP(ptr);
+                PUT(HDRP(split_bp), PACK(total_size - asize, 0));
+                PUT(FTRP(split_bp), PACK(total_size - asize, 0));
+            }
+
+            return ptr;
         }
-        else if () //둘다 프리
+        else if (!GET_ALLOC(HDRP(prev_ptr)) && (GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(prev_ptr)) >= asize))
         {
-            // 병합후 포인터를 prev로 변경, 남는 블록은 분할
+            size_t prev_total = GET_SIZE(HDRP(ptr)) + GET_SIZE(HDRP(prev_ptr));
+            PUT(HDRP(prev_ptr), PACK(prev_total, 1));
+            PUT(FTRP(prev_ptr), PACK(prev_total, 1));
+
+            if ((prev_total - asize) >= (2*DSIZE)) {
+                PUT(HDRP(prev_ptr), PACK(asize, 1));
+                PUT(FTRP(prev_ptr), PACK(asize, 1));
+
+                PUT(HDRP(split_bp), PACK(prev_total - asize, 0));
+                PUT(FTRP(split_bp), PACK(prev_total - asize, 0)); 
+            }
+
+            memcpy(prev_ptr, ptr, (size < copy_size) ? size : copy_size);
+
+            return prev_ptr;
         }
         else
         {
-            newptr = mm_malloc(size);
+            new_ptr = mm_malloc(size);
+            if (new_ptr == NULL) return NULL;
+            memcpy(new_ptr, ptr, (size < copy_size) ? size : copy_size);
+            mm_free(ptr);
+            return new_ptr;
         }
-        return 0;
     }
 
-    // newptr = mm_malloc(size);
-    // if (newptr == NULL)
+    // new_ptr = mm_malloc(size);
+    // if (new_ptr == NULL)
     //     return NULL;
-    // copySize = GET_SIZE(HDRP(oldptr)) - DSIZE; // 페이로드 사이즈
-    // if (size < copySize)
-    //     copySize = size;
-    // memcpy(newptr, oldptr, copySize);
+    // copy_size = GET_SIZE(HDRP(oldptr)) - DSIZE; // 페이로드 사이즈
+    // if (size < copy_size)
+    //     copy_size = size;
+    // memcpy(new_ptr, oldptr, copy_size);
     // mm_free(oldptr);
-    // return newptr;
-
-    
+    // return new_ptr;
 }
 
 // 힙의 크기를 확장하고 확장된 영역을 사용가능 블럭으로 초기화
